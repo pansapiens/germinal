@@ -142,7 +142,7 @@ class CustomIgLM(nn.Module, IgLM):
         full_grad = torch.autograd.grad(ce_loss, seq_logits)[0]
         return full_grad.detach(), ll
 
-    def get_ablm_grad(self, seq) -> np.ndarray:
+    def get_ablm_grad(self, seq, method=None) -> np.ndarray:
         # If seq is provided as a dict with logits, extract the tensor.
         if isinstance(seq, dict):
             current_logits = torch.tensor(seq["logits"][0], device=self.device, requires_grad=True)
@@ -161,7 +161,7 @@ class CustomIgLM(nn.Module, IgLM):
           iglm_grad_l, ll_l = self._get_iglm_grad(current_logits_l, chain='[LIGHT]')
           
           logits_shape = current_logits.shape[0] - current_logits_h.shape[0] - current_logits_l.shape[0]
-          iglm_grad = torch.cat([iglm_grad_h, torch.zeros((logits_shape,20), device='cuda'), iglm_grad_l], dim=0)
+          iglm_grad = torch.cat([iglm_grad_h, torch.zeros((logits_shape, 20), device=self.device), iglm_grad_l], dim=0)
 
           ll = np.sum([ll_l,ll_h])
 

@@ -141,7 +141,6 @@ def _get_or_generate_msas(
     from germinal.filters.af3 import (
         generate_local_msa,
         call_generate_colabfold_msa_with_timeout,
-        remove_a3m_insertions,
     )
 
     msa_paths = {}
@@ -291,6 +290,7 @@ def extract_protenix_scores(
     # PAE matrix from full data if available
     pae_matrix = np.array([[0.0]])
     token_asym_id = np.array([0])
+    full_data = {}
     if best_full_data_path and os.path.exists(best_full_data_path):
         with open(best_full_data_path, "r") as f:
             full_data = json.load(f)
@@ -480,16 +480,15 @@ def _run_protenix(
     popen = subprocess.Popen(
         run_cmds,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         universal_newlines=True,
     )
-    for line in popen.stdout:
-        continue #print(line, end="")
-
-    popen.stdout.close()
-    return_code = popen.wait()
+    _, stderr_data = popen.communicate()
+    return_code = popen.returncode
 
     if return_code:
+        if stderr_data:
+            print(f"Protenix stderr:\n{stderr_data}")
         raise subprocess.CalledProcessError(return_code, run_cmds)
 
     pdb_path, scores, ipsae = extract_protenix_scores(

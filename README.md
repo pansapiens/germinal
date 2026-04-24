@@ -9,7 +9,7 @@ Germinal is a pipeline for designing de novo antibodies against specified epitop
 
 We describe Germinal in the preprint: ["Efficient generation of epitope-targeted de novo antibodies with Germinal"](https://www.biorxiv.org/content/10.1101/2025.09.19.677421v1)
 
-**⚠️ We are still actively working on code improvements [See our recommendations/tips](#tips-for-design)**. 
+**⚠️ We are still actively working on code improvements [See our recommendations/tips](#tips-for-design)**. The Protenix and AbLang integrations are under active development — if you run into any issues please [open a GitHub issue](https://github.com/SantiagoMille/germinal/issues).
 
 ## Contents
 
@@ -28,6 +28,7 @@ We describe Germinal in the preprint: ["Efficient generation of epitope-targeted
    * [Filters Configuration](#filters-configuration)
    * [AF3 Configuration](#af3)
    * [Protenix Configuration](#protenix)
+   * [AbLang Configuration](#ablang)
    * [Structure Score Selection Mode](#score-selection)
 - [Output Format](#output-format)
 - [Tips for Design](#tips-for-design)
@@ -292,6 +293,18 @@ binder_near_hotspot:
   operator: '=='
 ```
 
+**Multi-relax ensemble (`multi_relax`):** by default Germinal runs a single PyRosetta FastRelax per structure during final filters. Setting `multi_relax: true` runs `n_relax` relaxations in parallel with different random seeds. `relax_score_mode` controls how the ensemble result is reported: `"average"` (default) averages numeric metrics across all runs; `"best"` returns metrics from the single lowest-energy run only. In both modes the structure with the lowest `binder_score` (most negative REU) is saved.
+
+```yaml
+multi_relax: true
+n_relax: 5
+relax_score_mode: "average"  # or "best"
+```
+
+> **⚠️ `multi_relax` is under active development.** If you encounter any issues, please [open a GitHub issue](https://github.com/SantiagoMille/germinal/issues).
+
+**AbLang sequence score (`lm_ll`):** the `lm_ll` column in `designs.csv` is the AbLang pseudo-log-likelihood of the final sequence — each residue is masked once and scored against full bidirectional context. Higher values indicate more natural antibody sequences. Uses AbLang1 for VHH and AbLang2 for scFv. Computed automatically for all accepted designs; useful as a post-hoc ranking criterion.
+
 <!-- TOC --><a name="af3"></a>
 ### AF3 Configuration
 
@@ -308,11 +321,15 @@ msa_db_dir: "/path/to/colabfold/databases"
 <!-- TOC --><a name="protenix"></a>
 ### Protenix Configuration
 
-[Protenix](https://github.com/bytedance/Protenix) is an open-source reimplementation of AlphaFold 3 by ByteDance. It can be used as an alternative structure prediction backend alongside AF3 and Chai. Protenix has dependencies that conflict with the main `germinal` environment, so it must be installed in a **separate conda environment**. The pipeline invokes it via `conda run -n <env>`.
+[Protenix](https://github.com/bytedance/Protenix) is an open-source reimplementation of AlphaFold 3 by ByteDance. It can be used as an alternative structure prediction backend alongside AF3 and Chai. **AF3 remains the recommended backend** — all published filter thresholds are calibrated against AF3 and Protenix has not been independently validated. Use Protenix when AF3 is not available (e.g. no Singularity/license access), but treat results as experimental.
+
+Protenix has dependencies that conflict with the main `germinal` environment, so it must be installed in a **separate conda environment**. The pipeline invokes it via `conda run -n <env>`.
 
 ```bash
 conda create --name protenix python=3.10 && conda activate protenix && pip install protenix
 ```
+
+Before running, download the model weights by following the [Protenix model download instructions](https://github.com/bytedance/Protenix?tab=readme-ov-file#model-weights). The `protenix_model_name` field must match the downloaded checkpoint name exactly.
 
 To use Protenix, set `structure_model: "protenix"` in your run config (or pass `structure_model=protenix` on the CLI) and configure the two required fields:
 
@@ -321,7 +338,43 @@ protenix_conda_env: "protenix"                       # conda env with protenix i
 protenix_model_name: "protenix_base_default_v1.0.0"  # model checkpoint name
 ```
 
-Optional speed tuning parameters (can also be set via CLI): `protenix_use_msa` (default `true`; set `false` to skip built-in MSA search), `protenix_samples` (default `5`), `protenix_cycles` (default `10`), `protenix_steps` (default `200`).
+Optional speed tuning parameters (can also be set via CLI): `protenix_use_msa` (default `true`), `protenix_samples` (default `5`), `protenix_cycles` (default `10`), `protenix_steps` (default `200`).
+
+> **`protenix_use_msa`**: Setting this to `false` skips Protenix's built-in MSA search (~3 min per prediction). For de novo antibody design there are typically no real homologs, so this is often acceptable for speed. However, disabling MSA may reduce confidence score accuracy — use `false` for faster runs and `true` when confidence quality is the priority.
+
+> **Known limitation**: When Protenix does not produce full PAE matrix output, interface metrics (`i_pae`, `i_plddt`) are unavailable and any filters on those metrics will be automatically passed. A warning is printed when this occurs.
+
+> **⚠️ Protenix support is under active development.** If you encounter any issues, please [open a GitHub issue](https://github.com/SantiagoMille/germinal/issues).
+
+<!-- TOC --><a name="ablang"></a>
+### AbLang Configuration
+
+Germinal uses an antibody language model (AbLang by default) to bias hallucination towards sequences with high naturalness. The language model gradient is mixed with the structural gradient at each step using the method specified by `grad_merge_method` (default: `"pcgrad"`).
+
+Key config parameters:
+
+```yaml
+ablm_model: "ablang"    # "ablang" (default) or "iglm"
+ablm_method: "pll"      # gradient method: "pll" (default), "mlm", or "unmasked"
+ablm_scale: [0.1, 0.4, 0.4, 1.0]  # ramp schedule (see below)
+ablm_temp: 0.6          # softmax temperature for sequence sampling
+grad_merge_method: "pcgrad"  # how to combine AF2 and AbLang gradients: "pcgrad", "scale", or "mgda"
+```
+
+**Gradient methods:**
+- `"pll"` (default): Salazar-style masked PLL — each position is masked once and scored; most principled but slower. Forward passes are chunked (default 8 for scFv, 32 for VHH) to bound GPU memory.
+- `"mlm"`: random-subset MLM — masks ~15% of positions per step; fast and stochastic.
+- `"unmasked"`: single forward pass cross-entropy; fastest but not true PLL.
+
+**`ablm_scale` ramp:** controls language model influence at each design phase. Defined as `[v1, v2, v3, v4]`:
+- Logits phase: ramps linearly from `v1` → `v2`
+- Softmax phase: holds at `v3`
+- Semigreedy phase: uses `v3`
+- Best-sequence selection criterion: uses `v4` as the LM score weight
+
+**Memory:** default chunk sizes are 8 (scFv / AbLang2) and 32 (VHH / AbLang1). If you encounter OOM errors, reduce with `pll_chunk_size=4` or lower, or set `ablm_method: "mlm"` for a single-pass alternative. Recommended: set `export XLA_PYTHON_CLIENT_PREALLOCATE=false` and `export XLA_CLIENT_MEM_FRACTION=0.5`.
+
+> **⚠️ AbLang integration is under active development.** If you encounter any issues, please [open a GitHub issue](https://github.com/SantiagoMille/germinal/issues).
 
 <!-- TOC --><a name="score-selection"></a>
 ### Structure Score Selection Mode
@@ -387,7 +440,7 @@ During sampling, we typically run antibody generation until there are around 1,0
 
 Please consider that:
 
-- We strongly recommend use of [AF3](https://github.com/google-deepmind/alphafold3) for design filtering as done in the paper, as **filters are only calibrated for AF3 confidence metrics**. We are actively working to add Chai calibrated thresholds for commercial users. Until then, running Germinal with `structure_model: "chai"` and NOT `structure_model: "af3"` should be considered experimental and may have lower passing rates. [Protenix](https://github.com/bytedance/Protenix) (`structure_model: "protenix"`) is also supported as a third structure prediction backend. Since Protenix is an open-source reimplementation of AF3, its confidence metrics are comparable, but this option should also be considered experimental. See the [Protenix Configuration](#protenix) section for setup instructions. Note that the current AF3 implementation assumes singularity for containerization. We are currently working on a Docker compatible wrapper, but if you need to run AF3 with Docker in the meantime, `_run_af3` in `germinal/filters/af3.py` holds the Singularity wrapper which should only need slight tweaks to run with Docker. More details on configuring AF3 are [here](#af3).
+- We strongly recommend use of [AF3](https://github.com/google-deepmind/alphafold3) for design filtering as done in the paper, as **filters are only calibrated for AF3 confidence metrics**. We are actively working to add Chai calibrated thresholds for commercial users. Until then, running Germinal with `structure_model: "chai"` and NOT `structure_model: "af3"` should be considered experimental and may have lower passing rates. [Protenix](https://github.com/bytedance/Protenix) (`structure_model: "protenix"`) is also supported as a third structure prediction backend. Since Protenix is an open-source reimplementation of AF3, its confidence metrics may be similar in nature, but filter thresholds have not been independently validated against Protenix outputs and this option should be considered experimental. See the [Protenix Configuration](#protenix) section for setup instructions. Note that the current AF3 implementation assumes singularity for containerization. We are currently working on a Docker compatible wrapper, but if you need to run AF3 with Docker in the meantime, `_run_af3` in `germinal/filters/af3.py` holds the Singularity wrapper which should only need slight tweaks to run with Docker. More details on configuring AF3 are [here](#af3).
 - While nanobody design is fully functional and validated experimentally, the configs and filters for scFvs remain preliminary; this functionality should therefore still be regarded as experimental.
 - As recommended in the preprint, we suggest performing a small parameter sweep before launching full sampling runs. This is especially important when working with a new target or selecting a new epitope. In `configs/run/vhh_pdl1.yaml` and `configs/run/vhh_il3.yaml`, we provide the parameters that we used for PD-L1 and IL3 nanobody generations in the pre-print. We also include the filters used for these runs under `configs/filter/initial/` and `configs/filter/final/`. In `configs/run/vhh.yaml` and `configs/run/scfv.yaml` we provide a set of reasonable default parameters that we used as a starting point for parameter exploration and sweep experiments (see below **Important Notes and Tips for Design** for more details). One important distinction is that the structure model in the default nanobody configuration is `chai` instead of `af3` in order to allow users to run the pipeline with no additional setup. Note that final sampling runs in the preprint all used slightly modified parameters. Parameters can be configured from the command line. For example, you can set `weights_beta` and `weights_plddt` with the following command:
 
@@ -413,7 +466,7 @@ weights_beta: 0.1
 framework_contact_offset: 1
 ```
 
-`ablm_scale` is a key parameter that controls the influence of IgLM during different stages of the design process. `ablm_scale` is defined as a list of four scalar values: `[v_1,v_2,v_3,v_4]`. During the logits phase, ablm_scale increases linearly between v_1 and v_2. During the softmax phase, ablm_scale takes the value of v_3, and during the semi-greedy stage ablm_scale takes the value of v_4. 
+`ablm_scale` is a key parameter that controls the influence of the antibody language model (AbLang/IgLM) during different stages of the design process. See the [AbLang Configuration](#ablang) section for a full description of the ramp schedule and gradient methods.
 
 Filters are also easily changeable in the filters configurations. To add or remove filters from the initial and final filtering rounds, simply create a new filter with the same name as the intended metric and specify the threshold value and the operator (<, >, =, etc).
 
@@ -450,7 +503,8 @@ python -u run_germinal.py run=scfv_pdl1 experiment_name=pdl1_scfv filter/initial
 
 <!-- TOC --><a name="troubleshooting"></a>
 ## Troubleshooting
-- We have occassionally observed OOM errors when using AbLang 1-heavy to design VHHs. If you are experiencing this error, try lowering the amount of memory Jax preallocates to 0.5 with `export XLA_CLIENT_MEM_FRACTION=0.5` or ` XLA_CLIENT_MEM_FRACTION=0.5 python run_germinal.py [args]`.
+- We have occasionally observed OOM errors when using AbLang 1-heavy to design VHHs. If you are experiencing this error, set `export XLA_PYTHON_CLIENT_PREALLOCATE=false` and `export XLA_CLIENT_MEM_FRACTION=0.5`.
+- OOM errors during the AbLang PLL gradient step: set `export XLA_PYTHON_CLIENT_PREALLOCATE=false` and `export XLA_CLIENT_MEM_FRACTION=0.5` to limit JAX pre-allocation. Default chunk sizes are 8 (scFv) and 32 (VHH); reduce with `pll_chunk_size=4` if needed. Alternatively, switch to the single-pass MLM method with `ablm_method=mlm`.
 
 <!-- TOC --><a name="bugfix-changelog"></a>
 ## Bugfix Changelog
@@ -460,6 +514,7 @@ python -u run_germinal.py run=scfv_pdl1 experiment_name=pdl1_scfv filter/initial
 - 9/26/25: Resolved an error which caused passing runs to crash at the final stage due to a misnamed variable ([commit 9292e1e](https://github.com/SantiagoMille/germinal/commit/9292e1e), [issue #11](https://github.com/SantiagoMille/germinal/issues/11))
 - 9/28/25: Resolved an error in throwing exception for AF3 calls + added containerization support ([commit e4ca63a](https://github.com/SantiagoMille/germinal/commit/e4ca63a), [raised in pr #12](https://github.com/SantiagoMille/germinal/pull/12))
 - 10/1/25: Resolved a bug where trajectory sequence and structure path information was not updated after AbMPNN redesign. True sequence / structures can still be found in the pdb files in the `structures/` folders ([commit b45136c](https://github.com/SantiagoMille/germinal/commit/b45136c))
+- 4/21/26: AbLang gradient refactor — chunked PLL to bound GPU memory for scFv, `ablm_method` config now correctly applied during hallucination, `run_germinal.py` unpack crash at filter stage fixed ([pr #68](https://github.com/SantiagoMille/germinal/pull/68))
 
 <!-- TOC --><a name="citation"></a>
 ## Citation
