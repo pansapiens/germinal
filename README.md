@@ -398,7 +398,7 @@ msa_db_dir: "/path/to/colabfold/databases"
 Protenix has dependencies that conflict with the main `germinal` environment, so it must be installed in a **separate conda environment**. The pipeline invokes it via `conda run -n <env>`.
 
 ```bash
-conda create --name protenix python=3.10 && conda activate protenix && pip install protenix
+conda create --name protenix python=3.10 && conda activate protenix && pip install 'protenix>=1.0.5'
 ```
 
 Before running, download the model weights by following the [Protenix model download instructions](https://github.com/bytedance/Protenix?tab=readme-ov-file#model-weights). The `protenix_model_name` field must match the downloaded checkpoint name exactly.
